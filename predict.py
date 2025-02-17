@@ -3,27 +3,19 @@
 
 import torchio as tio
 import argparse
+from typing import Optional
 
 from tumseg_misc import postProcessROIs
 from modules import TumSeg, buildSubjectList, runInference, resampleAndPostProcess, saveResults, windowCT
 
 
-def main():
-    parser = argparse.ArgumentParser()
+def main(input_path: str, 
+         output_path: str,
+         device: Optional[str],
+         run_uq: bool = False
+         ):
     
-    parser.add_argument('-i', '--input_path', type=str, required=True,
-                        help="Path to the input must be either a folder containing nifti files or ne a single file ending with .nii or .nii.gz")
-    parser.add_argument('-o', '--output_path', type=str, required=True,
-                        help="Path to the output directory")
-    parser.add_argument('--device', type=str, required=False,
-                        help="Path to the output directory")
-    parser.add_argument('--run_uq', action='store_true', default=False,
-                        help="Run UQ (default: False)")
     
-
-    args = parser.parse_args()
-
-
     ''' Setup TumSeg '''
     net_path_A = './networks/network_annotator_A.pt'
     net_path_B = './networks/network_annotator_B.pt'
@@ -35,7 +27,6 @@ def main():
     tumseg.init_ensemble(net_path_A, net_path_B, net_path_C)
     
     # Attach the post processing module 
-    
     post_proc_kwargs = {
             'classify_thres': 0.5, 
             'size_thres': 0.2, 
@@ -102,7 +93,23 @@ def main():
             
             
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    
+    parser.add_argument('-i', '--input_path', type=str, required=True,
+                        help="Path to the input must be either a folder containing nifti files or ne a single file ending with .nii or .nii.gz")
+    parser.add_argument('-o', '--output_path', type=str, required=True,
+                        help="Path to the output directory")
+    parser.add_argument('--device', type=str, required=False,
+                        help="Path to the output directory")
+    parser.add_argument('--run_uq', action='store_true', default=False,
+                        help="Run UQ (default: False)")
+    
+    args = parser.parse_args()
+        
+    main(input_path = args.input_path, 
+        output_path= args.input_path,
+        device = args.input_path,
+        run_uq = args.input_path)
 
 
 
