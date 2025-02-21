@@ -4,15 +4,19 @@
 import torchio as tio
 import argparse
 from typing import Optional
+import numpy as np
+import torch
 
-from tumseg_misc import postProcessROIs
+from tumseg_misc import postProcessROIs, locateMice, maybePermute
 from modules import TumSeg, buildSubjectList, runInference, resampleAndPostProcess, saveResults, windowCT
 
 
 def main(input_path: str, 
          output_path: str,
-         device: Optional[str],
-         run_uq: bool = False
+         device: Optional[str] = None,
+         run_uq: bool = False,
+         locate_mice: bool = False,
+         permute: Optional[str] = None
          ):
     
     
@@ -57,7 +61,8 @@ def main(input_path: str,
         [
          windowCT(-400, 400),
          tio.RescaleIntensity([0,1]),
-         tio.Resample(target_pixel_size) 
+         tio.Resample(target_pixel_size),
+         maybePermute(permute),
          ])
     
     subjects = buildSubjectList(args.input_path)
@@ -66,28 +71,40 @@ def main(input_path: str,
     dataloader = tio.SubjectsDataset(subjects, transform=transform)
     
     
-    for subj in dataloader:
+    for subj in dataloader:  
         print('Analyzing: ' + subj['path'])
-        output = runInference(subj, tumseg)
+        if locate_mice:
+            mice_slices = locateMice(subj['CT'].numpy()[0], crop_size=[112, 112], debug=False, verbose=False)
+        else:
+            mice_slices = None
         
+        output = runInference(subj, tumseg, mice_slices)
+        
+        # invert the permute if any
+        if permute:
+            output = np.transpose(output, np.argsort(permute))
+
         print('resampling..')
-        output = resampleAndPostProcess(output, subj, tumseg, target_pixel_size)
+        output = resampleAndPostProcess(output, subj, tumseg, target_pixel_size, locate_mice)
         
         if args.run_uq:
             print('Running Monte-Carlo samples for UQ..')
-            uq_pred = tumseg.runUQ(subj)
-            if uq_pred < 0:
-                uq_pred = 0
-            elif uq_pred > 1:
-                uq_pred = 1
-                
-            print('')
-            print('Expected Dice score: {:.3f}'.format(uq_pred))
-            print('')
+            predicted_dice = tumseg.runUQ(subj, mice_slices=mice_slices, n_dropouts=100)
             
-            saveResults(output, subj, args.input_path, args.output_path, uq_pred=uq_pred)
+            # print the predicted Dice score for each 
+            for i, uq_pred in enumerate(predicted_dice):
+                if uq_pred < 0:
+                    uq_pred = 0
+                elif uq_pred > 1:
+                    uq_pred = 1
+                    
+                print('')
+                print('Expected Dice score for mouse {}: {:.3f}'.format(i+1, uq_pred))
+                print('')
+            
+            saveResults(output, subj, input_path, output_path, uq_pred=predicted_dice)
         else:
-            saveResults(output, subj, args.input_path, args.output_path, uq_pred=None)
+            saveResults(output, subj, input_path, output_path, uq_pred=None)
 
         print('Done.\n\n')
             
@@ -97,19 +114,25 @@ if __name__ == "__main__":
     
     parser.add_argument('-i', '--input_path', type=str, required=True,
                         help="Path to the input must be either a folder containing nifti files or ne a single file ending with .nii or .nii.gz")
-    parser.add_argument('-o', '--output_path', type=str, required=True,
-                        help="Path to the output directory")
+    parser.add_argument('-o', '--output_path', type=str, required=False,
+                        help="Path to the output directory. If omitted, input_path will be used as output_path.")
     parser.add_argument('--device', type=str, required=False,
                         help="Path to the output directory")
-    parser.add_argument('--run_uq', action='store_true', default=False,
+    parser.add_argument('--run-uq', action='store_true', default=False,
                         help="Run UQ (default: False)")
+    parser.add_argument('--locate_mice', action='store_true', default=False,
+                        help="Run UQ (default: False)")
+    parser.add_argument('--permute', nargs='+', type=int,
+                        help='List of axes to permute')
     
     args = parser.parse_args()
         
     main(input_path = args.input_path, 
-        output_path= args.input_path,
-        device = args.input_path,
-        run_uq = args.input_path)
+         output_path= args.output_path,
+         device = args.device,
+         run_uq = args.run_uq,
+         locate_mice = args.locate_mice,
+         permute = args.permute)
 
 
 

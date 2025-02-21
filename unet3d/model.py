@@ -188,7 +188,8 @@ class Abstract3DUNet(nn.Module):
             
     def MC_predict(self, 
                    X: torch.Tensor, 
-                   n: int, do_p_encoder: float, 
+                   n: int, 
+                   do_p_encoder: float, 
                    do_p_decoder: float, 
                    post_process: bool = False,
                    show_progress: bool = False,
@@ -199,7 +200,7 @@ class Abstract3DUNet(nn.Module):
         self.do_decoder.p = do_p_decoder
         
         all_out = []
-        
+
         with torch.no_grad():
             if self.post_processor is not None:
                 CT_ref = X[0,0,:,:,:].cpu()

@@ -10,10 +10,10 @@ import nibabel as nib
 import numpy as np
 import os 
 import joblib
+import json
 
 from unet3d.model import UNet3D
-from tumseg_misc import computeRates, precisionRecallFscore
-
+from tumseg_misc import computeRates, precisionRecallFscore, locateMice
 
 class TumSeg(nn.Module):
     def __init__(self, net_path, device=None):
@@ -75,41 +75,58 @@ class TumSeg(nn.Module):
     def loadUQModel(self):
         self.tumseg_uq_model = joblib.load('./uq_regression_pipeline.joblib')
     
-    def runUQ(self, subj, n_dropouts = 100, e_p = 0.35, d_p = 0.35):
+    def runUQ(self, subj, n_dropouts = 100, e_p = 0.35, d_p = 0.35, mice_slices = None):
         
         with torch.no_grad():
             CT_in = subj['CT']['data'].unsqueeze(dim=0)
-            do_out = self.net_all.MC_predict(CT_in.to(self.device), n=n_dropouts, 
-                                do_p_encoder=e_p, do_p_decoder=d_p, post_process=False, show_progress = True)
             
+            if mice_slices:
+                predicted_dice = []
+                
+                for i, slice_ in enumerate(mice_slices.values()):
+                    print(f'Estimating Dice for mouse: {i+1}')
+                    
+                    sub_ct = CT_in[:,:,slice_['y_range'][0]:slice_['y_range'][1], 
+                                       slice_['x_range'][0]:slice_['x_range'][1],:]
+                    
+                    predicted_dice.append(self.predictDice(sub_ct, n_dropouts, e_p, d_p))
+                
+                return predicted_dice
+            else:
+                return [self.predictDice(CT_in, n_dropouts, e_p, d_p)]
             
-            entropy_masked = self.net_all.MC_entropy(do_out, CT_in = CT_in, reduction='mean', method='entropy',
-                                      masking = True)
+    def predictDice(self, CT_in, n_dropouts, e_p, d_p):   
+          
+        do_out = self.net_all.MC_predict(CT_in.to(self.device), n=n_dropouts, 
+                            do_p_encoder=e_p, do_p_decoder=d_p, post_process=False, show_progress = True)
         
-            cross_entropy_binary_masked = self.net_all.MC_entropy(do_out,CT_in = CT_in, reduction='mean', method='cross-entropy-binary',
-                                      masking = True)
-            
-            fleiss_kappa = self.net_all.MC_fleissKappa(do_out, CT_in=CT_in, post_process = True, chunks = 10)
-            
-            # Run the ensemble 
-            output_A = self.net_A(CT_in.to(self.device))
-            output_A = output_A.softmax(dim=1)
-            output_A = output_A[0,1,:,:,:].detach().cpu()
-            output_A = self.post_process(output_A, CT_in[0,0])            
-                        
-            output_B = self.net_A(CT_in.to(self.device))
-            output_B = output_B.softmax(dim=1)
-            output_B = output_B[0,1,:,:,:].detach().cpu()
-            output_B = self.post_process(output_B, CT_in[0,0])                    
-            
-            output_C = self.net_A(CT_in.to(self.device))
-            output_C = output_C.softmax(dim=1)
-            output_C = output_C[0,1,:,:,:].detach().cpu()
-            output_C = self.post_process(output_C, CT_in[0,0])            
-            
-            dice_ensemble = np.mean(getAllF1Combinations(output_A,output_B,output_C))
-            
         
+        entropy_masked = self.net_all.MC_entropy(do_out, CT_in = CT_in, reduction='mean', method='entropy',
+                                  masking = True)
+    
+        cross_entropy_binary_masked = self.net_all.MC_entropy(do_out,CT_in = CT_in, reduction='mean', method='cross-entropy-binary',
+                                  masking = True)
+        
+        fleiss_kappa = self.net_all.MC_fleissKappa(do_out, CT_in=CT_in, post_process = True, chunks = 10)
+        
+        # Run the ensemble 
+        output_A = self.net_A(CT_in.to(self.device))
+        output_A = output_A.softmax(dim=1)
+        output_A = output_A[0,1,:,:,:].detach().cpu()
+        output_A = self.post_process(output_A, CT_in[0,0])            
+                    
+        output_B = self.net_A(CT_in.to(self.device))
+        output_B = output_B.softmax(dim=1)
+        output_B = output_B[0,1,:,:,:].detach().cpu()
+        output_B = self.post_process(output_B, CT_in[0,0])                    
+        
+        output_C = self.net_A(CT_in.to(self.device))
+        output_C = output_C.softmax(dim=1)
+        output_C = output_C[0,1,:,:,:].detach().cpu()
+        output_C = self.post_process(output_C, CT_in[0,0])            
+        
+        dice_ensemble = np.mean(getAllF1Combinations(output_A,output_B,output_C))
+            
         X_uq = np.transpose(np.vstack([fleiss_kappa, entropy_masked, cross_entropy_binary_masked, dice_ensemble]))
         
         return self.tumseg_uq_model.predict(X_uq)[0]
@@ -191,40 +208,90 @@ def buildSubjectList(input_path):
         
     return subjects
 
-def runInference(subj, tumseg):
+def runInference(subj, tumseg, mice_slices):
     with torch.no_grad():
-        CT_in = subj['CT']['data'].unsqueeze(dim=0)
-        # output = net(CT_in.cuda())
-        output = tumseg(CT_in.to(tumseg.device))
-        output = output.softmax(dim=1)
         
-        output = output[0,1,:,:,:].detach().cpu()
-    
+        CT_in = subj['CT']['data'].unsqueeze(dim=0)
+     
+        if mice_slices:
+            output = torch.zeros(CT_in.shape[2:])    
+            for i, slice_ in enumerate(mice_slices.values()):
+                print(f'Predicting mouse: {i+1}')
+                
+                sub_ct = CT_in[:,:,slice_['y_range'][0]:slice_['y_range'][1], 
+                                   slice_['x_range'][0]:slice_['x_range'][1],:]
+                
+                sub_output = tumseg(sub_ct.to(tumseg.device))
+                sub_output = sub_output.softmax(dim=1)
+                
+                output[slice_['y_range'][0]:slice_['y_range'][1],
+                       slice_['x_range'][0]:slice_['x_range'][1],:] = sub_output[0,1,:,:,:].detach().cpu()
+            
+        else:    
+            output = tumseg(CT_in.to(tumseg.device))
+            output = output.softmax(dim=1)
+            
+            output = output[0,1,:,:,:].detach().cpu()
+        
     return output
 
-def resampleAndPostProcess(output, subj,tumseg, target_pixel_size):
+def resampleAndPostProcess(output, subj, tumseg, target_pixel_size, locate_mice):
     # inverse transform and post process 
     target_inverse_zoom = np.array(target_pixel_size) / np.array(subj['CT_prox'].header.get_zooms())
     output = scipy.ndimage.zoom(output, zoom=target_inverse_zoom, order=1) > 0.5 
+    
     CT_in = nib.load(subj['path']).get_fdata()
     CT_in = np.clip(CT_in, -400, 400)
-    output = tumseg.post_process(output, CT_in)
+    post_processed = tumseg.post_process(output, CT_in)
+    
+    # locate the since the CT is loaded now 
+    if locate_mice:
+        # decide the size of the bouding box
+        crop_factor = np.max(target_inverse_zoom[:2])
+        crop_size = int(112 * crop_factor)
+        
+        mice_slices = locateMice(CT_in, crop_size=[crop_size, crop_size], debug=False, verbose=False)
+    else:
+        mice_slices = None
+    
+    output = {
+        'post_processed': post_processed,
+        'mice_slices': mice_slices
+        }
     
     return output
 
 def saveResults(output, subj, input_path, output_path, uq_pred=None):
     # Save results as a nifti 
+    if input_path.endswith('nii.gz') or input_path.endswith('nii'):
+        input_path = '/'.join(input_path.split(os.sep)[:-1])
+                     
     rel_path = os.path.relpath('/'.join(subj['path'].split(os.sep)[:-1]), input_path)
+
+    if output_path is None:
+        output_path = input_path 
+    
     os.makedirs(os.path.join(output_path, rel_path), exist_ok=True)
-    new_nii = nib.Nifti1Image(output.astype(np.int8), subj['CT_prox'].affine, subj['CT_prox'].header)
+    
+    # make new nifti file
+    new_nii = nib.Nifti1Image(output['post_processed'].astype(np.int8), subj['CT_prox'].affine, subj['CT_prox'].header)
+    
+    # create the save path
     scan_name = subj['path'].split(os.sep)[-1].split('.')[0]
     full_save_path = os.path.join(output_path, rel_path, scan_name + '_tumor_mask.nii.gz')
+    
     print('Saving results to: ' + full_save_path)
     nib.save(new_nii, full_save_path)
     
     if uq_pred is not None:
         with open(os.path.join(output_path, rel_path, 'uq_dice_prediction.txt'), 'w') as f:
-            f.write('{:.3f}'.format(uq_pred))
+            for i, dice in enumerate(uq_pred):
+                f.write('Mouse_{},{:.3f}\n'.format(i+1, dice))
+    
+    if output['mice_slices']:
+        with open(os.path.join(output_path, rel_path, 'mice_bounding_box.json'), "w") as f: 
+            json.dump(output['mice_slices'], f, indent=4)
+    
          
     
     

@@ -1,6 +1,10 @@
 import numpy as np
 import scipy
-
+import matplotlib
+from scipy.optimize import curve_fit
+import matplotlib.pyplot as plt
+import matplotlib
+import torch
 
 '''
 Evaluation functions
@@ -150,7 +154,185 @@ def postProcessROIs(output, CT_in, classify_thres=0.5, size_thres=0.3, remove_in
         return proc_roi
     else:
         return output >= classify_thres
+    
+
+def locateMice(ct, guess=None, verbose=False, return_fit=False, crop_size=[96, 96], zoom_factor = [1,1,1], debug=False):
+    'Locates the mice if there is more than one'
+    
+    scale_x = ct.shape[1]/960
+    scale_y = ct.shape[0]/960
+    scale_z = ct.shape[2]/960
+
+    cut_len = int(35*scale_z)
+    
+    # current crop size
+    x_range = int(crop_size[1]/zoom_factor[1])
+    y_range = int(crop_size[0]/zoom_factor[0])
+
+    if verbose:
+        print('scale x: {:.2f}'.format(scale_x))
+        print('scale y: {:.2f}'.format(scale_y))
+        print('scale z: {:.2f}'.format(scale_z))
+        print('cut length z: {}'.format(cut_len))
+        print('')
+    
+    # clip CT at 
+    ct_array_clip = ct.copy()#.astype(np.int16)
+    # ct_array_clip[ct_array_clip>4e3] = 4e3
+    # ct_array_clip = ct_array_clip[:,:,cut_len:-cut_len]
+    
+    # max-project in the z-dimension
+    ct_proj = ct_array_clip.max(axis=2)
+    
+    # mean-project along axis x and y axis
+    x_mean_proj = ct_proj.mean(axis=0)
+    y_mean_proj = ct_proj.mean(axis=1)
+    
+    # normalize curves for potential plotting
+    x_mean_proj = normalize(x_mean_proj, a=0, b=200)
+    y_mean_proj = normalize(y_mean_proj, a=0, b=200)
+
+    # smooth out projections
+    N = int(50*scale_x)
+    x_mean_proj = np.convolve(x_mean_proj, np.ones(N)/N, mode='same')
+
+    N = int(50*scale_y)
+    y_mean_proj = np.convolve(y_mean_proj, np.ones(N)/N, mode='same')
+
+    # makes axes
+    x_axis = np.arange(len(x_mean_proj))
+    y_axis = np.arange(len(y_mean_proj))
+
+    # initial guess
+    if guess is None:
+        # mu, amp, sigma 
+        guess = [300*scale_x, 200*scale_x, 100, 
+                 600*scale_x, 200*scale_x, 100]
+        
+    # fit Gaussians to the x projection
+    fit_params_x, fit_x = fitGaussianMix(x_axis, x_mean_proj, guess)
+    two_mice_x_axis = 200*scale_x < np.abs(fit_params_x['mu'][0]-fit_params_x['mu'][1])
+    if not two_mice_x_axis:
+        fit_params_x, fit_x = fitGaussianMix(x_axis, x_mean_proj,  
+                                             guess = [np.mean(fit_params_x['mu']),
+                                                      np.mean(fit_params_x['amp']),
+                                                      np.mean(fit_params_x['sigma'])])
+      
+    # fit Gaussians two the y projection
+    fit_params_y, fit_y = fitGaussianMix(y_axis, y_mean_proj, guess)
+    two_mice_y_axis = 200*scale_y < np.abs(fit_params_y['mu'][0]-fit_params_y['mu'][1])
+    if not two_mice_y_axis:
+        fit_params_y, fit_y = fitGaussianMix(y_axis, y_mean_proj,  
+                                             guess = [np.mean(fit_params_y['mu']),
+                                                      np.mean(fit_params_y['amp']),
+                                                      np.mean(fit_params_y['sigma'])])
+    if verbose:
+        print('Two mice on x-axis: {}'.format(two_mice_x_axis))
+        print('Two mice on y-axis: {}'.format(two_mice_y_axis))
+        print('')
+        
+    num_mice = len(fit_params_x['mu']) * len(fit_params_y['mu'])
+        
+    mice_slice = {}
+    tmp_mice_slice = {}
+    
+    count = 0
+    for x_idx in range(len(fit_params_x['mu'])):
+        for y_idx in range(len(fit_params_y['mu'])):    
+            tmp_mice_slice[count] = {'x_range': [int(fit_params_x['mu'][x_idx]-x_range//2),
+                                                 int(fit_params_x['mu'][x_idx]+x_range//2)],
+                                     'y_range': [int(fit_params_y['mu'][y_idx]-y_range//2), 
+                                                 int(fit_params_y['mu'][y_idx]+y_range//2)]}
+            
+            count += 1
+        
+    sorted_mouse_list = sorted(tmp_mice_slice, key = lambda mouse: tmp_mice_slice[mouse]['x_range'][0], reverse=True)
+    
+    
+    for i in range(num_mice):
+        mice_slice['mouse_' + str(i+1)] = tmp_mice_slice[sorted_mouse_list[i]]
+
+    if verbose:
+        print('Mice slices: ')
+        print(mice_slice)
+        print('')
+        
+    if debug:
+        cmap = matplotlib.cm.get_cmap('tab10')
+        
+        fig, axx = plt.subplots()
+        
+        axx.imshow(ct_proj, cmap='gray', origin='lower')
+
+        axx.plot(x_mean_proj, alpha=0.7)
+        axx.plot(y_mean_proj, np.arange(len(y_mean_proj)), alpha=0.7)
+
+        for x_idx in range(len(fit_params_x['mu'])):
+            for y_idx in range(len(fit_params_y['mu'])):
+                rect = matplotlib.patches.Rectangle((fit_params_x['mu'][x_idx]-x_range//2,
+                                                     fit_params_y['mu'][y_idx]-y_range//2),
+                                             x_range, y_range, edgecolor=cmap(i), fill=False)        
+                axx.add_patch(rect)
+    
+
+        plt.show()
+
+    if return_fit:
+        return mice_slice, [fit_x, fit_y]
+    else:
+        return mice_slice
+
    
+def normalize(x, min_val=None, max_val=None, a=None, b=None):
+    '''
+    x is the data to be normalized. If min and max is None, the min and max from the data is used. If a and b is None, else 
+    the data is normalized between 0 and 1
+    '''
+    x_ = x.copy()
+    
+    # 0 to 1 is default
+    if all([a is None, b is None]):
+        a = 0
+        b = 1    
+    # check whether a max and min has been given
+    if all([min_val is None, max_val is None]):
+        x_ = (b-a)*(x_-np.min(x_))/(np.max(x_)-np.min(x_))+a
+    else:
+        x_ = (b-a)*(x_-min_val)/(max_val-min_val)+a
+        
+    return x_
 
 
+def fitGaussianMix(x, y, guess):
+    def guassianSum(x, *params):
+        y = np.zeros_like(x)
+        for i in range(0, len(params), 3):
+            mu = params[i]
+            amp = params[i+1]
+            sigma = params[i+2]
+            y = y + amp * np.exp( -((x - mu)/sigma)**2)
+        return y
+    
+    # fit parameters    
+    popt, pcov = curve_fit(guassianSum, x, y, p0=guess)
+    # show fit
+    fit = guassianSum(x, *popt)
+    # pack parameters
+    
+    fit_params = {'mu': [popt[i] for i in range(0, len(popt), 3)],
+                  'amp': [popt[i+1] for i in range(0, len(popt), 3)],
+                  'sigma': [popt[i+2] for i in range(0, len(popt), 3)]
+        }
+    
+    return fit_params, fit 
+
+def maybePermute(permute):
+    def _maybePermute(subject):
+        if subject:
+            subject['CT']['data'] = torch.permute(subject['CT']['data'], [0, permute[0]+1, permute[1]+1, permute[2]+1])
+        else:
+            pass
+        return subject
+    
+    return _maybePermute
 
