@@ -328,7 +328,7 @@ def fitGaussianMix(x, y, guess):
 
 def maybePermute(permute):
     def _maybePermute(subject):
-        if subject:
+        if permute:
             subject['CT']['data'] = torch.permute(subject['CT']['data'], [0, permute[0]+1, permute[1]+1, permute[2]+1])
         else:
             pass

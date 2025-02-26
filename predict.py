@@ -120,7 +120,7 @@ if __name__ == "__main__":
                         help="Path to the output directory")
     parser.add_argument('--run-uq', action='store_true', default=False,
                         help="Run UQ (default: False)")
-    parser.add_argument('--locate_mice', action='store_true', default=False,
+    parser.add_argument('--locate-mice', action='store_true', default=False,
                         help="Run UQ (default: False)")
     parser.add_argument('--permute', nargs='+', type=int,
                         help='List of axes to permute')
